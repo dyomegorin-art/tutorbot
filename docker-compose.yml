@@ -1,0 +1,49 @@
+x-app: &app
+  build: .
+  env_file: .env
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  api:
+    <<: *app
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      retries: 30
+
+  worker:
+    <<: *app
+    command: arq app.worker.WorkerSettings
+    depends_on:
+      api:
+        condition: service_healthy  # миграции применяет api при старте
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: tutorbot
+      POSTGRES_PASSWORD: tutorbot
+      POSTGRES_DB: tutorbot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tutorbot"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+volumes:
+  pgdata:
