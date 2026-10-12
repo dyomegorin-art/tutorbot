@@ -27,6 +27,7 @@ from app.schemas.webhooks import (
     WebhookRequestOut,
     WebhookRequestUpdate,
 )
+from app.services.webhook_payments import PAYMENT_TYPE, apply_payment
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +52,9 @@ def _duplicate(external_id: str) -> JSONResponse:
     description=(
         "Тело — JSON-объект с обязательным строковым `external_id`. Заголовок `X-Signature` — "
         "hex HMAC-SHA256 от сырого тела запроса по общему секрету. Повторная доставка с тем же "
-        "`external_id` возвращает 200 и ничего не создаёт."
+        '`external_id` возвращает 200 и ничего не создаёт. Заявка с `"type": "payment"`, '
+        "`booking_id` и `amount` сразу отмечает оплату брони (`source=webhook`); "
+        "некорректная получает статус `rejected`."
     ),
     openapi_extra={
         "requestBody": {
@@ -110,8 +113,10 @@ async def receive_request(
         log.warning("webhook idempotency check skipped, redis unavailable")
 
     row = WebhookRequest(external_id=external_id, payload=payload)
-    session.add(row)
     try:
+        if payload.get("type") == PAYMENT_TYPE:
+            row.status = await apply_payment(session, payload)
+        session.add(row)
         await session.commit()
     except IntegrityError:
         await session.rollback()

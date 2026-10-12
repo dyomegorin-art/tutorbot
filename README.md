@@ -42,6 +42,8 @@ docker compose exec api python -m app.cli create-tutor tutor@example.com 'tutor-
 
 ### Пример сценария
 
+Нужны `curl`, `jq` и `openssl`.
+
 ```bash
 API=http://localhost:8000/api/v1
 
@@ -73,6 +75,61 @@ curl -s -i $API/webhooks/requests -H "X-Signature: $SIG" -H 'Content-Type: appli
 ### Эндпоинты сверх таблиц ТЗ
 
 Для обработки заявок из вебхука репетитором добавлены `GET /webhooks/requests` (пагинация, фильтр `status`), `GET /webhooks/requests/{id}` и `PATCH /webhooks/requests/{id}` с телом `{"status": "processed" | "rejected"}`. Переход `new → processed/rejected` атомарный, повторная обработка — 409. Репетитор видит в `/students` только учеников, записанных на его слоты.
+
+Заявка вебхука с `"type": "payment"`, `booking_id` и `amount` отмечает оплату брони автоматически (`source=webhook`) в той же транзакции, что и сохранение заявки, поэтому дубль `external_id` не проводит платёж дважды. Некорректная заявка (нет брони, бронь отменена или уже оплачена, неверная сумма) сохраняется со статусом `rejected` и видна репетитору; остальные заявки остаются `new` до ручной обработки.
+
+### Примеры ответов
+
+Реальные ответы сервиса (поля `created_at`/`updated_at` в списках опущены).
+
+**Бронирование слота** — `POST /bookings` → `201`:
+
+```json
+{
+  "id": 1, "slot_id": 1, "student_id": 2, "tutor_id": 4,
+  "status": "active",
+  "starts_at": "2026-10-15T10:00:00Z", "ends_at": "2026-10-15T11:00:00Z",
+  "cancelled_at": null
+}
+```
+
+Повторная попытка забронировать тот же слот — `409`, единый формат ошибок:
+
+```json
+{"error": {"code": "slot_already_booked", "message": "Slot is already booked"}}
+```
+
+**Свободные слоты** — `GET /slots?free=true&date=2026-10-15` → `200`:
+
+```json
+{
+  "items": [
+    {"id": 1, "tutor_id": 4, "starts_at": "2026-10-15T10:00:00Z",
+     "ends_at": "2026-10-15T11:00:00Z", "is_free": true}
+  ],
+  "total": 1, "limit": 20, "offset": 0
+}
+```
+
+**Вебхук** — первая доставка `202`, повторная с тем же `external_id` — `200`, неверная подпись — `401`:
+
+```json
+{"id": 1, "external_id": "readme-pay-1", "status": "accepted"}
+{"external_id": "readme-pay-1", "status": "duplicate"}
+{"error": {"code": "invalid_signature", "message": "Invalid or missing signature"}}
+```
+
+**Оплата через вебхук** — заявка `{"external_id": "readme-pay-1", "type": "payment", "booking_id": 1, "amount": "1500.00"}` сразу отмечает бронь оплаченной; `GET /payments` → `200`:
+
+```json
+{
+  "items": [
+    {"id": 1, "booking_id": 1, "amount": "1500.00", "status": "paid",
+     "paid_at": "2026-10-12T11:57:56Z", "source": "webhook"}
+  ],
+  "total": 1, "limit": 20, "offset": 0
+}
+```
 
 ### Общие правила API
 
@@ -156,6 +213,6 @@ docker compose run --rm -v "$PWD":/srv api pytest --cov
 
 ## Что можно улучшить
 
-- Реальные уведомления (Telegram) и платёжная система; оплата через вебхук (`source=webhook`, статус `pending`).
+- Реальные уведомления (Telegram) и платёжная система; сейчас платёж не имеет статуса `pending` — он создаётся сразу оплаченным (вручную или вебхуком).
 - Скользящее окно для rate limiting, метка времени в подписи вебхука, отзыв refresh-токенов.
 - Повторяющиеся слоты, несколько репетиторов с публичными профилями (см. «Вне объёма» в ТЗ).
